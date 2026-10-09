@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+data/llm-settings.json
+data/records/*.json
+data/uploads/*
+
+# macOS
+.DS_Store
+._*
+*.AppleDouble
