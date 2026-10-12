@@ -1,9 +1,16 @@
 node_modules
+.venv
 dist
 .env
 data/llm-settings.json
 data/records/*.json
 data/uploads/*
+
+# 客户业务文档（招标/报价等），不纳入版本库
+test-docs/*.doc
+test-docs/*.docx
+test-docs/*.pdf
+test-docs/*.xlsx
 
 # macOS
 .DS_Store

@@ -1,0 +1,96 @@
+{
+  "id": "expert-example-001",
+  "name": "专家整理示例-抗肿瘤单抗项目",
+  "createdAt": "2026-10-08T09:00:00.000Z",
+  "updatedAt": "2026-10-08T09:00:00.000Z",
+  "meta": {
+    "sourceFileName": "expertExample.json",
+    "sourceFileType": "json",
+    "extractionMode": "llm",
+    "extractedAt": "2026-10-08T09:00:00.000Z"
+  },
+  "values": {
+    "client.companyName": "上海某创新生物医药有限公司",
+    "client.contactName": "张敏",
+    "client.jobTitle": "非临床研究负责人",
+    "client.phoneNumber": "13800138000",
+    "client.email": "zhangmin@example.com",
+    "client.address": "上海市浦东新区张江高科技园区科苑路88号",
+    "article.nameOrCode": "IB-201 / 抗PD-1单克隆抗体注射液",
+    "article.drugType": [
+      "4-8"
+    ],
+    "article.reportingAuthority": [
+      "nmpa",
+      "fda"
+    ],
+    "article.reportingAuthorityMemo": "拟同步支持中美申报，当前以IND资料准备为主。",
+    "article.additionalRequirements": [
+      "send_dataset",
+      "translation_cn_to_en",
+      "peer_review_domestic_pathologist"
+    ],
+    "article.additionalRequirementsMemo": "需要英文版总结报告及SEND数据集交付。",
+    "article.declarationType": [
+      "ind"
+    ],
+    "article.declarationTypeMemo": "首轮IND申报，后续视结果推进NDA。",
+    "article.indications.diseaseType": "晚期实体瘤",
+    "article.indications.isAntiTumor": "yes",
+    "article.indications.memo": "拟用于二线及以上治疗场景。",
+    "article.indications.target": "PD-1",
+    "article.keyInfo.animalSpecies": [
+      "monkey",
+      "mouse"
+    ],
+    "article.keyInfo.animalSpeciesMemo": "常规毒理优先食蟹猴，药效补充人源化小鼠模型可另行讨论。",
+    "article.keyInfo.bioAnalyticalMethods": [
+      "elisa",
+      "flow_cytometry"
+    ],
+    "article.keyInfo.bioAnalyticalMethodsMemo": "PK采用ELISA，免疫分型采用流式分析。",
+    "article.keyInfo.analyteCount": "3",
+    "article.keyInfo.analyteCountMemo": "包含原型抗体、抗药抗体及关键细胞因子指标。",
+    "article.clinicalUse.route": [
+      "intravenous_infusion"
+    ],
+    "article.clinicalUse.routeMemo": "临床拟静脉输注给药。",
+    "article.clinicalUse.frequency": [
+      "once_per_week"
+    ],
+    "article.clinicalUse.frequencyMemo": "首周期每周一次，后续可根据方案调整。",
+    "article.clinicalUse.cycle": [
+      "1_to_3_months"
+    ],
+    "article.clinicalUse.cycleMemo": "计划连续给药8周。",
+    "article.excipient.clientProvided": "no",
+    "article.excipient.procurementByInnostar": "yes",
+    "article.excipient.designatedSupplier": "yes",
+    "article.excipient.specificContent": "磷酸盐缓冲液、氯化钠及注射用水",
+    "article.excipient.supplierName": "国药集团化学试剂有限公司",
+    "article.excipient.productNumber": "EXC-2026-0918",
+    "article.excipient.memo": "赋形剂由益诺思采购，委托方指定供应商与批次要求。",
+    "article.generalCommissioningContent": [
+      "toxicology",
+      "pharmacokinetics",
+      "pharmacotoxicology_review_writing"
+    ],
+    "article.generalCommissioningContentMemo": "希望覆盖正式毒理、TK及综述撰写服务。",
+    "handover.projectStartDate": "2026-11-01",
+    "handover.useTechnologyVouchers": "pending",
+    "handover.toxicologyLocation": "苏州毒理评价中心",
+    "handover.statutoryReportingDate": "2027-04-30",
+    "handover.translationReportDate": "2027-05-15",
+    "handover.sendDate": "2027-05-20",
+    "handover.deliveryDate": "2026-10-25"
+  },
+  "missingFields": [
+    "handover.useTechnologyVouchers"
+  ],
+  "issues": [
+    {
+      "fieldId": "handover.useTechnologyVouchers",
+      "reason": "该字段仍待确认"
+    }
+  ]
+}

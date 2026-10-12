@@ -9,6 +9,9 @@ import pdfParse from "pdf-parse";
 import WordExtractor from "word-extractor";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { convertToMp3, transcribeWithVolc } from "./volc-transcription.js";
+import { transcribeWithSenseVoice } from "./sensevoice-transcription.js";
+import { buildSimplificationMessages } from "./simplify-input.js";
 
 import {
   FieldExplanation,
@@ -20,7 +23,11 @@ import {
   createEmptyFieldExplanations,
   createEmptyRecord,
   createEmptyValues,
+  getMissingFieldIds,
+  hasFieldValue,
+  matchDrugSubtypes,
   normalizeFieldValue,
+  normalizeLegacyDrugType,
 } from "../shared/schema.js";
 
 const rootDir = process.cwd();
@@ -31,6 +38,7 @@ const clientDistDir = path.join(rootDir, "dist", "client");
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
+const audioUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
@@ -69,16 +77,21 @@ app.get("/api/records/:id", async (req, res) => {
   res.json(record);
 });
 
-app.post("/api/parse", upload.single("file"), async (req, res) => {
+app.post("/api/parse/document", upload.single("file"), async (req, res) => {
   if (!req.file) {
     res.status(400).json({ message: "请先上传文件" });
     return;
   }
 
+  const sourceFileName = normalizeUploadedFileName(req.file.originalname);
+  if (![".doc", ".docx", ".pdf"].includes(path.extname(sourceFileName).toLowerCase())) {
+    res.status(400).json({ message: "文档仅支持 doc、docx、pdf 格式" });
+    return;
+  }
+
   try {
     const settings = await loadLlmSettings();
-    const sourceFileName = normalizeUploadedFileName(req.file.originalname);
-    const extractedText = await extractTextFromFile(req.file, settings);
+    const extractedText = await extractTextFromDocument(req.file);
     const record = await buildRecordFromText({
       rawText: extractedText,
       fileName: sourceFileName,
@@ -91,6 +104,146 @@ app.post("/api/parse", upload.single("file"), async (req, res) => {
     res.status(500).json({
       message: error instanceof Error ? error.message : "解析失败，请稍后重试",
     });
+  }
+});
+
+const acceptAudioUpload: express.RequestHandler = (req, res, next) => {
+  audioUpload.single("file")(req, res, (error: unknown) => {
+    if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
+      res.status(413).json({ message: "录音文件不能超过 50 MB" });
+      return;
+    }
+    if (error) return next(error);
+    next();
+  });
+};
+
+app.post("/api/convert/audio", acceptAudioUpload, async (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ message: "请先上传录音文件" });
+    return;
+  }
+  const fileName = normalizeUploadedFileName(req.file.originalname);
+  if (![".m4a", ".mp3", ".wav"].includes(path.extname(fileName).toLowerCase())) {
+    res.status(400).json({ message: "录音仅支持 m4a、mp3、wav 格式" });
+    return;
+  }
+  try {
+    const mp3 = await convertToMp3(req.file.buffer);
+    res.type("audio/mpeg").send(mp3);
+  } catch (error) {
+    console.error("Audio conversion failed:", error);
+    res.status(500).json({
+      message: error instanceof Error ? error.message : "录音转码失败，请稍后重试",
+    });
+  }
+});
+
+app.post("/api/transcribe", acceptAudioUpload, async (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ message: "请先上传录音文件" });
+    return;
+  }
+
+  const fileName = normalizeUploadedFileName(req.file.originalname);
+  if (![".m4a", ".mp3", ".wav"].includes(path.extname(fileName).toLowerCase())) {
+    res.status(400).json({ message: "录音仅支持 m4a、mp3、wav 格式" });
+    return;
+  }
+
+  try {
+    const settings = await loadLlmSettings();
+    if (settings.transcriptionProvider !== "sensevoice" && !settings.transcriptionApiKey) {
+      res.status(400).json({ message: "请先配置语音转文字 API Key" });
+      return;
+    }
+    const alreadyConverted = req.body?.converted === "true";
+    if (alreadyConverted && (settings.transcriptionProvider !== "volc" || path.extname(fileName).toLowerCase() !== ".mp3")) {
+      res.status(400).json({ message: "只有火山语音模式支持提交已转码的 mp3" });
+      return;
+    }
+    const text = settings.transcriptionProvider === "volc"
+      ? await transcribeWithVolc(req.file.buffer, settings, alreadyConverted)
+      : settings.transcriptionProvider === "sensevoice"
+        ? await transcribeWithSenseVoice(req.file.buffer, fileName)
+        : await transcribeAudio(req.file, settings);
+    res.json({ text, fileName, mimeType: req.file.mimetype });
+  } catch (error) {
+    console.error("Audio transcription failed:", error);
+    res.status(500).json({
+      message: error instanceof Error ? error.message : "录音转写失败，请稍后重试",
+    });
+  }
+});
+
+app.post("/api/parse/transcript", async (req, res) => {
+  const { text, fileName, mimeType } = (req.body ?? {}) as {
+    text?: unknown;
+    fileName?: unknown;
+    mimeType?: unknown;
+  };
+  if (typeof text !== "string" || !text.trim() || typeof fileName !== "string" || !fileName.trim()) {
+    res.status(400).json({ message: "请先转写录音并确认文字内容" });
+    return;
+  }
+  if (![".m4a", ".mp3", ".wav"].includes(path.extname(fileName).toLowerCase())) {
+    res.status(400).json({ message: "转写文本必须来自 m4a、mp3、wav 录音" });
+    return;
+  }
+
+  try {
+    const settings = await loadLlmSettings();
+    if (!settings.useLlmExtraction || !settings.apiKey) {
+      res.status(400).json({ message: "录音表单提取需要启用大语言模型并配置字段抽取 API Key" });
+      return;
+    }
+    const record = await buildRecordFromText({
+      rawText: text.trim(),
+      fileName: normalizeUploadedFileName(fileName),
+      mimeType: typeof mimeType === "string" ? mimeType : "",
+      transcript: text.trim(),
+    }, settings, true);
+    res.json(record);
+  } catch (error) {
+    console.error("Transcript extraction failed:", error);
+    res.status(500).json({
+      message: error instanceof Error ? error.message : "录音表单提取失败，请稍后重试",
+    });
+  }
+});
+
+app.post("/api/simplify/input", async (req, res) => {
+  const input = req.body?.record as TemplateRecord | undefined;
+  if (!input || !input.meta || typeof input.meta.transcript !== "string" ||
+      !input.meta.transcript.trim() || input.meta.extractionMode !== "llm" ||
+      ![".m4a", ".mp3", ".wav"].includes(path.extname(input.meta.sourceFileName ?? "").toLowerCase())) {
+    res.status(400).json({ message: "请先从录音转写文字提取表单，再简化输入" });
+    return;
+  }
+
+  try {
+    const settings = await loadLlmSettings();
+    const openai = createOpenAiClient(settings.apiKey, settings.baseURL);
+    if (!openai || !settings.useLlmExtraction) {
+      res.status(400).json({ message: "简化输入需要启用大语言模型并配置字段抽取 API Key" });
+      return;
+    }
+    const record = normalizeRecord(input);
+    const completion = await openai.chat.completions.create({
+      model: settings.chatModel,
+      response_format: { type: "json_object" },
+      temperature: 0.1,
+      messages: buildSimplificationMessages(record),
+    });
+    const content = completion.choices[0]?.message?.content;
+    const parsed = content ? JSON.parse(content) as { simplifiedInput?: unknown } : {};
+    if (typeof parsed.simplifiedInput !== "string" || !parsed.simplifiedInput.trim()) {
+      throw new Error("模型未返回有效的简化内容");
+    }
+    res.json({ simplifiedInput: parsed.simplifiedInput.trim() });
+  } catch (error) {
+    console.error("Input simplification failed:", error);
+    res.status(500).json({ message: error instanceof Error ? error.message : "简化输入失败，请稍后重试" });
   }
 });
 
@@ -135,8 +288,19 @@ async function loadLlmSettings(): Promise<LlmSettings> {
     apiKey: process.env.OPENAI_API_KEY ?? "",
     baseURL: process.env.OPENAI_BASE_URL ?? "",
     chatModel: process.env.OPENAI_MODEL ?? createDefaultLlmSettings().chatModel,
+    transcriptionApiKey: process.env.TRANSCRIPTION_API_KEY ?? "",
+    transcriptionBaseURL:
+      process.env.TRANSCRIPTION_BASE_URL ?? createDefaultLlmSettings().transcriptionBaseURL,
     transcriptionModel:
       process.env.TRANSCRIPTION_MODEL ?? createDefaultLlmSettings().transcriptionModel,
+    transcriptionProvider: process.env.TRANSCRIPTION_PROVIDER === "volc" || process.env.TRANSCRIPTION_PROVIDER === "sensevoice"
+      ? process.env.TRANSCRIPTION_PROVIDER : "openai",
+    volcResourceId: process.env.VOLC_RESOURCE_ID ?? createDefaultLlmSettings().volcResourceId,
+    tosAccessKeyId: process.env.TOS_ACCESS_KEY_ID ?? "",
+    tosAccessKeySecret: process.env.TOS_ACCESS_KEY_SECRET ?? "",
+    tosRegion: process.env.TOS_REGION ?? "",
+    tosEndpoint: process.env.TOS_ENDPOINT ?? "",
+    tosBucket: process.env.TOS_BUCKET ?? "",
   });
 
   if (!(await pathExists(settingsPath))) {
@@ -144,9 +308,15 @@ async function loadLlmSettings(): Promise<LlmSettings> {
   }
 
   const content = await fs.readFile(settingsPath, "utf-8");
-  return normalizeLlmSettings({
+    const saved = JSON.parse(content) as Partial<LlmSettings>;
+    return normalizeLlmSettings({
     ...defaults,
-    ...(JSON.parse(content) as Partial<LlmSettings>),
+      ...saved,
+      // Legacy settings shared the text provider; require an explicit speech setup.
+      transcriptionModel:
+        saved.transcriptionApiKey === undefined && saved.transcriptionBaseURL === undefined
+          ? defaults.transcriptionModel
+          : saved.transcriptionModel ?? defaults.transcriptionModel,
   });
 }
 
@@ -162,9 +332,21 @@ function normalizeLlmSettings(input: Partial<LlmSettings>): LlmSettings {
     apiKey: String(input.apiKey ?? defaults.apiKey).trim(),
     baseURL: String(input.baseURL ?? defaults.baseURL).trim(),
     chatModel: String(input.chatModel ?? defaults.chatModel).trim() || defaults.chatModel,
+    transcriptionProvider: input.transcriptionProvider === "volc" || input.transcriptionProvider === "sensevoice"
+      ? input.transcriptionProvider : "openai",
+    transcriptionApiKey: String(input.transcriptionApiKey ?? defaults.transcriptionApiKey).trim(),
+    transcriptionBaseURL:
+      String(input.transcriptionBaseURL ?? defaults.transcriptionBaseURL).trim() ||
+      defaults.transcriptionBaseURL,
     transcriptionModel:
       String(input.transcriptionModel ?? defaults.transcriptionModel).trim() ||
       defaults.transcriptionModel,
+    volcResourceId: String(input.volcResourceId ?? defaults.volcResourceId).trim() || defaults.volcResourceId,
+    tosAccessKeyId: String(input.tosAccessKeyId ?? defaults.tosAccessKeyId).trim(),
+    tosAccessKeySecret: String(input.tosAccessKeySecret ?? defaults.tosAccessKeySecret).trim(),
+    tosRegion: String(input.tosRegion ?? defaults.tosRegion).trim(),
+    tosEndpoint: String(input.tosEndpoint ?? defaults.tosEndpoint).trim(),
+    tosBucket: String(input.tosBucket ?? defaults.tosBucket).trim(),
     useLlmExtraction:
       typeof input.useLlmExtraction === "boolean"
         ? input.useLlmExtraction
@@ -172,14 +354,14 @@ function normalizeLlmSettings(input: Partial<LlmSettings>): LlmSettings {
   };
 }
 
-function createOpenAiClient(settings: LlmSettings) {
-  if (!settings.apiKey) {
+function createOpenAiClient(apiKey: string, baseURL: string) {
+  if (!apiKey) {
     return null;
   }
 
   return new OpenAI({
-    apiKey: settings.apiKey,
-    baseURL: settings.baseURL || undefined,
+    apiKey,
+    baseURL: baseURL || undefined,
   });
 }
 
@@ -230,10 +412,7 @@ async function pathExists(targetPath: string) {
   }
 }
 
-async function extractTextFromFile(
-  file: Express.Multer.File,
-  settings: LlmSettings,
-): Promise<string> {
+async function extractTextFromDocument(file: Express.Multer.File): Promise<string> {
   const sourceFileName = normalizeUploadedFileName(file.originalname);
   const extension = path.extname(sourceFileName).toLowerCase();
 
@@ -262,32 +441,34 @@ async function extractTextFromFile(
     }
   }
 
-  if (isAudioFile(extension, file.mimetype)) {
-    return transcribeAudio(file, settings);
-  }
-
-  throw new Error("当前仅支持录音、doc、docx、pdf 文件");
-}
-
-function isAudioFile(extension: string, mimeType: string) {
-  const audioExtensions = new Set([".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".webm"]);
-  return audioExtensions.has(extension) || mimeType.startsWith("audio/");
+  throw new Error("当前仅支持 doc、docx、pdf 文件");
 }
 
 async function transcribeAudio(
   file: Express.Multer.File,
   settings: LlmSettings,
 ): Promise<string> {
-  const openai = createOpenAiClient(settings);
+  const openai = createOpenAiClient(settings.transcriptionApiKey, settings.transcriptionBaseURL);
   if (!openai) {
-    throw new Error("未配置 API Key，暂时无法转写录音文件");
+    throw new Error("请先配置语音转文字 API Key");
   }
 
-  const transcription = await openai.audio.transcriptions.create({
-    file: await toFile(file.buffer, normalizeUploadedFileName(file.originalname), { type: file.mimetype }),
-    model: settings.transcriptionModel,
-  });
+  let transcription;
+  try {
+    transcription = await openai.audio.transcriptions.create({
+      file: await toFile(file.buffer, normalizeUploadedFileName(file.originalname), {
+        type: file.mimetype || "application/octet-stream",
+      }),
+      model: settings.transcriptionModel,
+    });
+  } catch (error) {
+    const status = error instanceof OpenAI.APIError ? `（HTTP ${error.status}）` : "";
+    throw new Error(`语音转文字服务调用失败${status}，请检查转写 API 地址、模型和密钥`);
+  }
 
+  if (!transcription.text?.trim()) {
+    throw new Error("语音转文字服务未返回文字内容");
+  }
   return transcription.text.trim();
 }
 
@@ -295,14 +476,19 @@ async function buildRecordFromText(input: {
   rawText: string;
   fileName: string;
   mimeType: string;
-}, settings: LlmSettings): Promise<TemplateRecord> {
+  transcript?: string;
+}, settings: LlmSettings, requireLlm = false): Promise<TemplateRecord> {
   const now = new Date().toISOString();
   const baseRecord = createEmptyRecord();
-  const parsed =
-    (await extractWithLlm(input.rawText, settings).catch((error) => {
-      console.warn("LLM extraction failed, fallback to heuristic parser.", error);
-      return null;
-    })) ?? heuristicExtract(input.rawText, input.fileName);
+  const parsed = requireLlm
+    ? await extractWithLlm(input.rawText, settings).catch((error) => {
+        console.error("Transcript LLM extraction failed:", error);
+        throw new Error("大语言模型提取表单失败，请检查字段抽取模型及接口配置");
+      })
+    : (await extractWithLlm(input.rawText, settings).catch((error) => {
+        console.warn("LLM extraction failed, fallback to heuristic parser.", error);
+        return null;
+      })) ?? heuristicExtract(input.rawText, input.fileName);
 
   const values = createEmptyValues();
   const fieldExplanations = createEmptyFieldExplanations();
@@ -310,6 +496,10 @@ async function buildRecordFromText(input: {
     values[field.id] = normalizeFieldValue(field, parsed.values[field.id]);
     fieldExplanations[field.id] = normalizeFieldExplanation(parsed.fieldExplanations?.[field.id]);
   }
+  const rawDrugType = parsed.values["article.drugType"];
+  const legacyDrugType = typeof rawDrugType === "string" && !hasFieldValue(values["article.drugType"])
+    ? rawDrugType.trim()
+    : undefined;
 
   const missingFields = getMissingFields(values);
   const issues = dedupeIssues([
@@ -327,10 +517,12 @@ async function buildRecordFromText(input: {
     meta: {
       sourceFileName: input.fileName,
       sourceFileType: input.mimeType,
+        transcript: input.transcript,
       extractionMode: parsed.mode,
       extractedAt: now,
     },
     values,
+    legacyDrugType,
     fieldExplanations,
     missingFields,
     issues,
@@ -349,7 +541,7 @@ async function extractWithLlm(rawText: string, settings: LlmSettings): Promise<{
     throw new Error("LLM extraction disabled");
   }
 
-  const openai = createOpenAiClient(settings);
+  const openai = createOpenAiClient(settings.apiKey, settings.baseURL);
   if (!openai) {
     throw new Error("LLM not configured");
   }
@@ -371,7 +563,7 @@ async function extractWithLlm(rawText: string, settings: LlmSettings): Promise<{
       {
         role: "system",
         content:
-          "你是一名供试品信息抽取助手。请根据原始材料提取模板字段，严格输出 JSON。不要猜测未出现的信息；缺失项放到 missingFields 并给出 issues。对于枚举字段，优先输出 schema 中 option 的 value。对每个已识别字段，尽量补充 fieldExplanations，包含原文依据 sourceText 和推理说明 reasoning。",
+          "你是一名供试品信息抽取助手。请根据原始材料提取模板字段，严格输出 JSON。不要猜测未出现的信息；缺失项放到 missingFields 并给出 issues。对于枚举字段，优先输出 schema 中 option 的 value。药物类型可跨大类多选，但 article.drugType 只能输出有明确依据的具体子类编码数组，不能根据大类推测子类。对每个已识别字段，尽量补充 fieldExplanations，包含原文依据 sourceText 和推理说明 reasoning。",
       },
       {
         role: "user",
@@ -539,10 +731,15 @@ function heuristicExtract(rawText: string, fileName: string) {
     );
   }
 
-  const drugType = inferDrugType(text);
-  if (drugType) {
-    values["article.drugType"] = drugType;
-    fieldExplanations["article.drugType"] = buildDrugTypeExplanation(text, drugType);
+  const drugSubtypes = matchDrugSubtypes(text);
+  if (drugSubtypes.length > 0) {
+    values["article.drugType"] = drugSubtypes;
+    fieldExplanations["article.drugType"] = {
+      sourceText: text.split("\n")
+        .filter((line) => matchDrugSubtypes(line).some((value) => drugSubtypes.includes(value)))
+        .slice(0, 6).join("\n").slice(0, 1000),
+      reasoning: "仅提取原文中明确出现的药物子类，不依据大类猜测子类。",
+    };
   }
 
   const declarationTypes = collectOptionMatches("article.declarationType", text);
@@ -607,7 +804,7 @@ function heuristicExtract(rawText: string, fileName: string) {
   }
 
   for (const fieldId of REQUIRED_FIELD_IDS) {
-    if (!hasValue(values[fieldId])) {
+    if (!hasFieldValue(values[fieldId])) {
       issues.push({
         fieldId,
         reason: "兜底规则未能识别，建议人工确认",
@@ -648,49 +845,29 @@ function collectOptionMatches(fieldId: string, text: string) {
     .map((option) => option.value);
 }
 
-function inferDrugType(text: string) {
-  const normalized = text.toLowerCase();
-  const lookup: Array<[string, string]> = [
-    ["疫苗", "vaccine"],
-    ["vaccine", "vaccine"],
-    ["细胞治疗", "cell_therapy_immune_cell"],
-    ["stem cell", "cell_therapy_stem_cell"],
-    ["干细胞", "cell_therapy_stem_cell"],
-    ["gene therapy", "gene_therapy"],
-    ["基因治疗", "gene_therapy"],
-    ["核酸", "nucleic_acid_medicines"],
-    ["biological", "biological_product"],
-    ["生物制品", "biological_product"],
-    ["化药", "chemical_drug"],
-    ["small molecule", "chemical_drug"],
-    ["中药", "traditional_chinese_medicine"],
-  ];
-
-  const matched = lookup.find(([keyword]) => normalized.includes(keyword.toLowerCase()));
-  return matched?.[1];
-}
-
 function normalizeRecord(input: TemplateRecord): TemplateRecord {
+  const compatible = normalizeLegacyDrugType(input);
   const values = createEmptyValues();
   const fieldExplanations = createEmptyFieldExplanations();
   for (const field of TEMPLATE_FIELDS) {
-    values[field.id] = normalizeFieldValue(field, input.values?.[field.id]);
-    fieldExplanations[field.id] = normalizeFieldExplanation(input.fieldExplanations?.[field.id]);
+    values[field.id] = normalizeFieldValue(field, compatible.values?.[field.id]);
+    fieldExplanations[field.id] = normalizeFieldExplanation(compatible.fieldExplanations?.[field.id]);
   }
 
   const missingFields = getMissingFields(values);
   const issues = dedupeIssues([
-    ...(input.issues ?? []),
+    ...(compatible.issues ?? []).filter((issue) => !hasFieldValue(values[issue.fieldId])),
     ...missingFields.map((fieldId) => ({
       fieldId,
-      reason: "该字段仍需用户确认",
+      reason: values[fieldId] === "pending" ? "该字段仍待确认" : "该字段仍需用户确认",
     })),
   ]);
   const now = new Date().toISOString();
 
   return {
-    ...input,
+    ...compatible,
     name: input.name?.trim() || "未命名解析",
+    simplifiedInput: typeof input.simplifiedInput === "string" ? input.simplifiedInput.trim() : undefined,
     values,
     fieldExplanations,
     missingFields,
@@ -700,6 +877,7 @@ function normalizeRecord(input: TemplateRecord): TemplateRecord {
     meta: {
       sourceFileName: normalizeUploadedFileName(input.meta?.sourceFileName ?? ""),
       sourceFileType: input.meta?.sourceFileType,
+        transcript: input.meta?.transcript,
       extractionMode: input.meta?.extractionMode ?? "heuristic",
       extractedAt: input.meta?.extractedAt ?? now,
     },
@@ -707,14 +885,7 @@ function normalizeRecord(input: TemplateRecord): TemplateRecord {
 }
 
 function getMissingFields(values: Record<string, string | string[]>) {
-  return REQUIRED_FIELD_IDS.filter((fieldId) => !hasValue(values[fieldId]));
-}
-
-function hasValue(value: unknown) {
-  if (Array.isArray(value)) {
-    return value.length > 0;
-  }
-  return typeof value === "string" ? value.trim().length > 0 : false;
+  return getMissingFieldIds(values);
 }
 
 function dedupeIssues(issues: Array<{ fieldId: string; reason: string }>) {
@@ -756,17 +927,23 @@ function normalizeUploadedFileName(fileName: string) {
 }
 
 function normalizeRecordMetadata(record: TemplateRecord): TemplateRecord {
+  const compatible = normalizeLegacyDrugType(record);
+  const values = createEmptyValues();
   const fieldExplanations = createEmptyFieldExplanations();
   for (const field of TEMPLATE_FIELDS) {
-    fieldExplanations[field.id] = normalizeFieldExplanation(record.fieldExplanations?.[field.id]);
+    values[field.id] = normalizeFieldValue(field, compatible.values?.[field.id]);
+    fieldExplanations[field.id] = normalizeFieldExplanation(compatible.fieldExplanations?.[field.id]);
   }
 
   return {
-    ...record,
+    ...compatible,
+    values,
+    missingFields: getMissingFields(values),
+    issues: (compatible.issues ?? []).filter((issue) => !hasFieldValue(values[issue.fieldId])),
     fieldExplanations,
     meta: {
-      ...record.meta,
-      sourceFileName: normalizeUploadedFileName(record.meta?.sourceFileName ?? ""),
+      ...compatible.meta,
+      sourceFileName: normalizeUploadedFileName(compatible.meta?.sourceFileName ?? ""),
     },
   };
 }
@@ -838,24 +1015,5 @@ function buildOptionMatchExplanation(
       .map((label) => firstLine(text, new RegExp(escapeRegExp(label), "i")) || label)
       .join("；"),
     reasoning,
-  };
-}
-
-function buildDrugTypeExplanation(text: string, drugType: string): FieldExplanation {
-  const lookup: Array<[RegExp, string]> = [
-    [/(疫苗|vaccine)/i, "命中“疫苗 / vaccine”关键词，映射为疫苗。"],
-    [/(细胞治疗)/i, "命中“细胞治疗”关键词，默认映射为免疫细胞产品。"],
-    [/(stem cell|干细胞)/i, "命中“stem cell / 干细胞”关键词，映射为干细胞产品。"],
-    [/(gene therapy|基因治疗)/i, "命中“gene therapy / 基因治疗”关键词，映射为基因治疗。"],
-    [/(核酸)/i, "命中“核酸”关键词，映射为核酸药物。"],
-    [/(biological|生物制品)/i, "命中“biological / 生物制品”关键词，映射为生物制品。"],
-    [/(化药|small molecule)/i, "命中“化药 / small molecule”关键词，映射为化药。"],
-    [/(中药)/i, "命中“中药”关键词，映射为中药。"],
-  ];
-
-  const matched = lookup.find(([pattern]) => pattern.test(text));
-  return {
-    sourceText: matched ? firstLine(text, matched[0]) || matched[0].source : drugType,
-    reasoning: matched?.[1] ?? "根据规则关键词映射药物类型。",
   };
 }

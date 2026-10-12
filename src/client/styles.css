@@ -397,6 +397,91 @@ code {
   align-items: end;
 }
 
+.conversion-success {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid #b7ebc6;
+  border-radius: var(--radius-control);
+  background: #f6ffed;
+  color: #237245;
+}
+
+.conversion-success a {
+  color: #2155b5;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.conversion-success .tip {
+  flex-basis: 100%;
+}
+
+.transcript-panel,
+.simplified-panel {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+  padding: var(--space-5);
+  border: 1px solid var(--accent-100);
+  border-radius: var(--radius-card);
+  background: var(--surface-panel-muted);
+}
+
+.transcript-heading,
+.transcript-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.transcript-heading {
+  justify-content: space-between;
+}
+
+.transcript-heading strong {
+  font-size: var(--text-lg);
+}
+
+.transcript-progress {
+  color: var(--ink-700);
+}
+
+.transcript-progress .loading-spinner {
+  flex: none;
+  margin-top: 0;
+}
+
+.transcript-error {
+  padding: var(--space-3);
+  border: 1px solid var(--warn-100);
+  border-radius: var(--radius-control);
+  background: var(--warn-050);
+  color: var(--warn-700);
+}
+
+.transcript-panel button {
+  justify-self: start;
+}
+
+.transcript-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.simplified-panel textarea {
+  min-height: 200px;
+  line-height: 1.7;
+}
+
+.upload-panel .parsing-status-card {
+  margin-top: var(--space-5);
+}
+
 .action-stack,
 .action-row,
 .summary-main,
@@ -498,6 +583,17 @@ code {
   gap: 14px;
   padding: 0 var(--space-6) var(--space-6);
   border-top: 1px solid var(--ink-100);
+}
+
+.settings-subtitle {
+  margin: var(--space-3) 0 0;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--ink-100);
+  font-size: var(--text-lg);
+}
+
+.settings-subtitle:first-child {
+  border-top: 0;
 }
 
 .settings-grid {
@@ -623,6 +719,63 @@ code {
 
 .checkbox-item input {
   width: auto;
+}
+
+.drug-type-control,
+.drug-type-groups,
+.suggestion-control {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.drug-type-groups {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  align-items: start;
+}
+
+.drug-type-group {
+  border: 1px solid var(--ink-200);
+  border-radius: var(--radius-control);
+  background: var(--surface-panel);
+}
+
+.drug-type-group[open] {
+  border-color: var(--accent-100);
+}
+
+.drug-type-group summary {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  cursor: pointer;
+  padding: 10px 14px;
+  font-weight: 600;
+  color: var(--ink-900);
+}
+
+.drug-type-count {
+  white-space: nowrap;
+  color: var(--accent-700);
+  font-size: var(--text-xs);
+}
+
+.drug-type-group .checkbox-group {
+  display: grid;
+  gap: 10px;
+  padding: 4px 14px 14px;
+}
+
+.drug-type-legacy {
+  border: 1px solid var(--warn-100);
+  border-radius: var(--radius-control);
+  padding: 10px 12px;
+  background: var(--warn-050);
+  color: var(--warn-700);
+}
+
+.handover-note {
+  margin-bottom: var(--space-4);
 }
 
 .field-explanation,
